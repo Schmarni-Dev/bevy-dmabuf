@@ -1,4 +1,4 @@
-use zbus::zvariant::{self, OwnedFd};
+use zvariant::{self, OwnedFd};
 
 /// Dmabuf Backed Texture
 #[derive(Debug, serde::Serialize, serde::Deserialize, zvariant::Type)]

@@ -18,15 +18,16 @@ bevy = { version = "0.16", features = [
 ], default-features = false }
 color-eyre = "0.6.3"
 drm-fourcc = "2.2.0"
-thiserror = "2.0.12"
-wgpu = "24"
-zbus = "5.7.0"
 serde = { version = "1", features = ["derive"] }
+thiserror = "2.0.12"
 tracing = { version = "0.1", default-features = false }
+wgpu = "24"
+zvariant = "5.7.0"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["full"] }
 bevy = { version = "0.16", default-features = true }
+zbus = "5.11.0"
 
 [workspace]
 members = ["example_usages"]
