@@ -320,6 +320,7 @@ fn memory_barrier(
                     u64::MAX,
                 )
                 .unwrap();
+            vk_dev.destroy_semaphore(timeline_semaphore, None);
             vk_dev.destroy_command_pool(command_pool, None);
         })
     };
