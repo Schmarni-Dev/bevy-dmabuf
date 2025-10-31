@@ -283,23 +283,43 @@ fn memory_barrier(
             }
             drop(vk_submit_span);
             vk_dev.end_command_buffer(buffer).unwrap();
-            let fence = vk_dev
-                .create_fence(
-                    &vk::FenceCreateInfo {
-                        flags: vk::FenceCreateFlags::empty(),
-                        ..Default::default()
-                    },
+            // let fence = vk_dev
+            //     .create_fence(
+            //         &vk::FenceCreateInfo {
+            //             flags: vk::FenceCreateFlags::empty(),
+            //             ..Default::default()
+            //         },
+            //         None,
+            //     )
+            //     .unwrap();
+            let mut timeline_info =
+                vk::SemaphoreTypeCreateInfo::default().semaphore_type(vk::SemaphoreType::TIMELINE);
+            let timeline_semaphore = vk_dev
+                .create_semaphore(
+                    &vk::SemaphoreCreateInfo::default().push_next(&mut timeline_info),
                     None,
                 )
                 .unwrap();
+            let mut timeline_info =
+                vk::TimelineSemaphoreSubmitInfo::default().signal_semaphore_values(&[2]);
             vk_dev
                 .queue_submit(
                     dev.raw_queue(),
-                    &[vk::SubmitInfo::default().command_buffers(&[buffer])],
-                    fence,
+                    &[vk::SubmitInfo::default()
+                        .command_buffers(&[buffer])
+                        .signal_semaphores(&[timeline_semaphore])
+                        .push_next(&mut timeline_info)],
+                    vk::Fence::null(),
                 )
                 .unwrap();
-            vk_dev.wait_for_fences(&[fence], true, u64::MAX).unwrap();
+            vk_dev
+                .wait_semaphores(
+                    &vk::SemaphoreWaitInfo::default()
+                        .values(&[2])
+                        .semaphores(&[timeline_semaphore]),
+                    u64::MAX,
+                )
+                .unwrap();
             vk_dev.destroy_command_pool(command_pool, None);
         })
     };
