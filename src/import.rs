@@ -257,7 +257,7 @@ fn memory_barrier(
                     &[],
                     &[vk::ImageMemoryBarrier {
                         src_access_mask: vk::AccessFlags::NONE,
-                        dst_access_mask: vk::AccessFlags::SHADER_READ,
+                        dst_access_mask: vk::AccessFlags::NONE,
                         old_layout: vk::ImageLayout::GENERAL,
                         new_layout: vk::ImageLayout::GENERAL,
                         // TODO: might want to use vk::QUEUE_FAMILY_FOREIGN_EXT instead
@@ -524,7 +524,7 @@ pub fn import_texture(
                     .samples(vk::SampleCountFlags::TYPE_1)
                     .array_layers(1)
                     .mip_levels(1)
-                    .initial_layout(vk::ImageLayout::GENERAL)
+                    .initial_layout(vk::ImageLayout::UNDEFINED)
                     .tiling(vk::ImageTiling::DRM_FORMAT_MODIFIER_EXT)
                     .push_next(&mut external_memory_info);
                 if let Some(info) = drm_explicit_create_info.as_mut() {
