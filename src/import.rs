@@ -1,15 +1,13 @@
 #![warn(clippy::unwrap_used, clippy::expect_used)]
 use std::{
     fmt::Debug,
-    ops::Deref,
     os::fd::{IntoRawFd as _, OwnedFd},
     sync::{Arc, Mutex},
 };
 
 use ash::vk::{
-    self, CommandBufferBeginInfo, CommandPoolCreateInfo, FormatFeatureFlags2,
-    ImagePlaneMemoryRequirementsInfo, MemoryDedicatedRequirements, MemoryRequirements2,
-    SubresourceLayout,
+    self, CommandBufferBeginInfo, FormatFeatureFlags2, ImagePlaneMemoryRequirementsInfo,
+    MemoryDedicatedRequirements, MemoryRequirements2, SubresourceLayout,
 };
 use bevy::{
     app::Plugin,
@@ -26,7 +24,7 @@ use bevy::{
     render::{
         Render, RenderApp, RenderSet,
         extract_resource::{ExtractResource, ExtractResourcePlugin},
-        render_asset::{RenderAssetDependency as _, RenderAssets, prepare_assets},
+        render_asset::{RenderAssets, prepare_assets},
         render_resource::{Texture, TextureView},
         renderer::RenderDevice,
         texture::GpuImage,
@@ -38,7 +36,7 @@ use thiserror::Error;
 use tracing::{debug, debug_span, error, warn};
 use wgpu::{
     TextureUsages, TextureViewDescriptor,
-    hal::{Device, MemoryFlags, TextureDescriptor, TextureUses, vulkan::Api as Vulkan},
+    hal::{MemoryFlags, TextureDescriptor, TextureUses, vulkan::Api as Vulkan},
 };
 
 use crate::{
@@ -226,7 +224,7 @@ fn memory_barrier(
                 return;
             };
 
-            vk_dev
+            if vk_dev
                 .begin_command_buffer(
                     buffer,
                     &CommandBufferBeginInfo {
@@ -234,7 +232,12 @@ fn memory_barrier(
                         ..Default::default()
                     },
                 )
-                .unwrap();
+                .inspect_err(|err| error!("failed to begin command buffer: {err}"))
+                .is_err()
+            {
+                vk_dev.destroy_command_pool(command_pool, None);
+                return;
+            }
 
             let vk_submit_span = debug_span!("VK dmatex image acquire").entered();
             for image in texes
@@ -282,7 +285,15 @@ fn memory_barrier(
                 );
             }
             drop(vk_submit_span);
-            vk_dev.end_command_buffer(buffer).unwrap();
+            if vk_dev
+                .end_command_buffer(buffer)
+                .inspect_err(|err| error!("failed to end command buffer: {err}"))
+                .is_err()
+            {
+                vk_dev.destroy_command_pool(command_pool, None);
+                return;
+            }
+
             // let fence = vk_dev
             //     .create_fence(
             //         &vk::FenceCreateInfo {
@@ -294,15 +305,19 @@ fn memory_barrier(
             //     .unwrap();
             let mut timeline_info =
                 vk::SemaphoreTypeCreateInfo::default().semaphore_type(vk::SemaphoreType::TIMELINE);
-            let timeline_semaphore = vk_dev
+            let Ok(timeline_semaphore) = vk_dev
                 .create_semaphore(
                     &vk::SemaphoreCreateInfo::default().push_next(&mut timeline_info),
                     None,
                 )
-                .unwrap();
+                .inspect_err(|err| error!("failed to create timeline semaphore: {err}"))
+            else {
+                vk_dev.destroy_command_pool(command_pool, None);
+                return;
+            };
             let mut timeline_info =
                 vk::TimelineSemaphoreSubmitInfo::default().signal_semaphore_values(&[2]);
-            vk_dev
+            if vk_dev
                 .queue_submit(
                     dev.raw_queue(),
                     &[vk::SubmitInfo::default()
@@ -311,15 +326,27 @@ fn memory_barrier(
                         .push_next(&mut timeline_info)],
                     vk::Fence::null(),
                 )
-                .unwrap();
-            vk_dev
+                .inspect_err(|err| error!("failed to submit queue: {err}"))
+                .is_err()
+            {
+                vk_dev.destroy_command_pool(command_pool, None);
+                vk_dev.destroy_semaphore(timeline_semaphore, None);
+                return;
+            };
+            if vk_dev
                 .wait_semaphores(
                     &vk::SemaphoreWaitInfo::default()
                         .values(&[2])
                         .semaphores(&[timeline_semaphore]),
                     u64::MAX,
                 )
-                .unwrap();
+                .inspect_err(|err| error!("failed to wait for semaphore: {err}"))
+                .is_err()
+            {
+                vk_dev.destroy_command_pool(command_pool, None);
+                vk_dev.destroy_semaphore(timeline_semaphore, None);
+                return;
+            };
             vk_dev.destroy_semaphore(timeline_semaphore, None);
             vk_dev.destroy_command_pool(command_pool, None);
         })
@@ -340,17 +367,17 @@ fn insert_dmatex_into_gpu_images(
             imported.remove(&handle);
             continue;
         }
-        if matches!(imported.get(&handle), Some(DmaImage::UnImported(_, _, _))) {
-            if let Some(DmaImage::UnImported(dmabuf, on_drop, usage)) = imported.remove(&handle) {
-                match import_texture(&device, dmabuf, on_drop, usage) {
-                    Ok(tex) => {
-                        debug!("imported dmatex");
-                        imported.insert(handle.clone(), DmaImage::Imported(tex));
-                    }
-                    Err(err) => {
-                        error!("failed to import dmatex: {err}");
-                        continue;
-                    }
+        if matches!(imported.get(&handle), Some(DmaImage::UnImported(_, _, _)))
+            && let Some(DmaImage::UnImported(dmabuf, on_drop, usage)) = imported.remove(&handle)
+        {
+            match import_texture(&device, dmabuf, on_drop, usage) {
+                Ok(tex) => {
+                    debug!("imported dmatex");
+                    imported.insert(handle.clone(), DmaImage::Imported(tex));
+                }
+                Err(err) => {
+                    error!("failed to import dmatex: {err}");
+                    continue;
                 }
             }
         }
@@ -442,7 +469,17 @@ fn get_imported_descriptor(buf: &Dmatex) -> Result<wgpu::TextureDescriptor<'stat
 pub struct ImportedTexture {
     texture: Texture,
     texture_view: TextureView,
-    usage: DmatexUsage,
+    _usage: DmatexUsage,
+}
+
+impl ImportedTexture {
+    pub fn new(texture: Texture, texture_view: TextureView) -> ImportedTexture {
+        ImportedTexture {
+            texture,
+            texture_view,
+            _usage: DmatexUsage::Sampling,
+        }
+    }
 }
 
 #[tracing::instrument(level = "debug", skip(device, on_drop))]
@@ -755,6 +792,6 @@ pub fn import_texture(
     Ok(ImportedTexture {
         texture,
         texture_view,
-        usage,
+        _usage: usage,
     })
 }
