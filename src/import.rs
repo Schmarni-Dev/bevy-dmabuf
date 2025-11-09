@@ -1,13 +1,15 @@
 #![warn(clippy::unwrap_used, clippy::expect_used)]
 use std::{
     fmt::Debug,
+    ops::Deref,
     os::fd::{IntoRawFd as _, OwnedFd},
     sync::{Arc, Mutex},
 };
 
 use ash::vk::{
-    self, FormatFeatureFlags2, ImagePlaneMemoryRequirementsInfo, MemoryDedicatedRequirements,
-    MemoryRequirements2, SubresourceLayout,
+    self, CommandBufferBeginInfo, CommandPoolCreateInfo, FormatFeatureFlags2,
+    ImagePlaneMemoryRequirementsInfo, MemoryDedicatedRequirements, MemoryRequirements2,
+    SubresourceLayout,
 };
 use bevy::{
     app::Plugin,
@@ -16,6 +18,7 @@ use bevy::{
         resource::Resource,
         schedule::{IntoScheduleConfigs as _, SystemSet},
         system::{Res, ResMut},
+        world::World,
     },
     image::Image,
     pbr::{PreparedMaterial, StandardMaterial},
@@ -23,7 +26,7 @@ use bevy::{
     render::{
         Render, RenderApp, RenderSet,
         extract_resource::{ExtractResource, ExtractResourcePlugin},
-        render_asset::{RenderAssets, prepare_assets},
+        render_asset::{RenderAssetDependency as _, RenderAssets, prepare_assets},
         render_resource::{Texture, TextureView},
         renderer::RenderDevice,
         texture::GpuImage,
@@ -35,7 +38,7 @@ use thiserror::Error;
 use tracing::{debug, debug_span, error, warn};
 use wgpu::{
     TextureUsages, TextureViewDescriptor,
-    hal::{MemoryFlags, TextureDescriptor, TextureUses, vulkan::Api as Vulkan},
+    hal::{Device, MemoryFlags, TextureDescriptor, TextureUses, vulkan::Api as Vulkan},
 };
 
 use crate::{
@@ -70,6 +73,13 @@ impl Plugin for DmabufImportPlugin {
             render_app.add_systems(
                 Render,
                 insert_dmatex_into_gpu_images.in_set(DmatexRenderSystemSet::InsertIntoGpuImages),
+            );
+            render_app.add_systems(
+                Render,
+                (
+                    acquire_dmatex_images.in_set(DmatexRenderSystemSet::AcquireDmatexs),
+                    release_dmatex_images.in_set(DmatexRenderSystemSet::ReleaseDmatexs),
+                ),
             );
         } else {
             warn!("unable to init dmabuf importing!");
@@ -150,6 +160,170 @@ impl ImportedDmatexs {
             .insert(handle.clone_weak(), DmaImage::Imported(tex));
         handle
     }
+}
+
+fn acquire_dmatex_images(world: &mut World) {
+    let device = world.resource::<RenderDevice>();
+    let dmatexs = world.resource::<ImportedDmatexs>();
+    memory_barrier(device, dmatexs, ImageQueueTransfer::Acquire);
+}
+fn release_dmatex_images(world: &mut World) {
+    let device = world.resource::<RenderDevice>();
+    let dmatexs = world.resource::<ImportedDmatexs>();
+    memory_barrier(device, dmatexs, ImageQueueTransfer::Release);
+}
+
+enum ImageQueueTransfer {
+    Acquire,
+    Release,
+}
+
+fn memory_barrier(
+    device: &RenderDevice,
+    dmatexs: &ImportedDmatexs,
+    queue_transfer_direction: ImageQueueTransfer,
+) {
+    unsafe {
+        device.wgpu_device().as_hal::<Vulkan, _, _>(|dev| {
+            let Some(dev) = dev else {
+                return;
+            };
+            let vk_dev = dev.raw_device();
+            let Ok(command_pool) = vk_dev
+                .create_command_pool(
+                    &vk::CommandPoolCreateInfo {
+                        flags: vk::CommandPoolCreateFlags::TRANSIENT,
+                        queue_family_index: dev.queue_family_index(),
+                        ..Default::default()
+                    },
+                    None,
+                )
+                .inspect_err(|e| error!("Unable to create command pool: {e}"))
+            else {
+                return;
+            };
+
+            let Ok(Some(buffer)) = dev
+                .raw_device()
+                .allocate_command_buffers(&vk::CommandBufferAllocateInfo {
+                    command_pool,
+                    level: vk::CommandBufferLevel::PRIMARY,
+                    command_buffer_count: 1,
+                    ..Default::default()
+                })
+                .inspect_err(|e| error!("Unable to allocate command buffer: {e}"))
+                .map(|v| v.into_iter().next())
+            else {
+                vk_dev.destroy_command_pool(command_pool, None);
+                return;
+            };
+            let Ok(texes) = dmatexs
+                .0
+                .lock()
+                .inspect_err(|e| error!("Unable to lock dmatexs: {e}"))
+            else {
+                vk_dev.destroy_command_pool(command_pool, None);
+                return;
+            };
+
+            vk_dev
+                .begin_command_buffer(
+                    buffer,
+                    &CommandBufferBeginInfo {
+                        flags: vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT,
+                        ..Default::default()
+                    },
+                )
+                .unwrap();
+
+            let vk_submit_span = debug_span!("VK dmatex image acquire").entered();
+            for image in texes
+                .iter()
+                .filter_map(|v| match v.1 {
+                    DmaImage::UnImported(_, _, _) => None,
+                    DmaImage::Imported(imported_texture) => Some(imported_texture),
+                })
+                .filter_map(|i| {
+                    i.texture
+                        .as_hal::<Vulkan, _, _>(|i| i.map(|i| i.raw_handle()))
+                })
+            {
+                vk_dev.cmd_pipeline_barrier(
+                    buffer,
+                    vk::PipelineStageFlags::TOP_OF_PIPE,
+                    vk::PipelineStageFlags::BOTTOM_OF_PIPE,
+                    vk::DependencyFlags::empty(),
+                    &[],
+                    &[],
+                    &[vk::ImageMemoryBarrier {
+                        src_access_mask: vk::AccessFlags::NONE,
+                        dst_access_mask: vk::AccessFlags::NONE,
+                        old_layout: vk::ImageLayout::GENERAL,
+                        new_layout: vk::ImageLayout::GENERAL,
+                        // TODO: might want to use vk::QUEUE_FAMILY_FOREIGN_EXT instead
+                        src_queue_family_index: match queue_transfer_direction {
+                            ImageQueueTransfer::Acquire => vk::QUEUE_FAMILY_EXTERNAL,
+                            ImageQueueTransfer::Release => dev.queue_family_index(),
+                        },
+                        dst_queue_family_index: match queue_transfer_direction {
+                            ImageQueueTransfer::Acquire => dev.queue_family_index(),
+                            ImageQueueTransfer::Release => vk::QUEUE_FAMILY_EXTERNAL,
+                        },
+                        image,
+                        subresource_range: vk::ImageSubresourceRange {
+                            aspect_mask: vk::ImageAspectFlags::COLOR,
+                            base_mip_level: 0,
+                            level_count: 1,
+                            base_array_layer: 0,
+                            layer_count: 1,
+                        },
+                        ..Default::default()
+                    }],
+                );
+            }
+            drop(vk_submit_span);
+            vk_dev.end_command_buffer(buffer).unwrap();
+            // let fence = vk_dev
+            //     .create_fence(
+            //         &vk::FenceCreateInfo {
+            //             flags: vk::FenceCreateFlags::empty(),
+            //             ..Default::default()
+            //         },
+            //         None,
+            //     )
+            //     .unwrap();
+            let mut timeline_info =
+                vk::SemaphoreTypeCreateInfo::default().semaphore_type(vk::SemaphoreType::TIMELINE);
+            let timeline_semaphore = vk_dev
+                .create_semaphore(
+                    &vk::SemaphoreCreateInfo::default().push_next(&mut timeline_info),
+                    None,
+                )
+                .unwrap();
+            let mut timeline_info =
+                vk::TimelineSemaphoreSubmitInfo::default().signal_semaphore_values(&[2]);
+            vk_dev
+                .queue_submit(
+                    dev.raw_queue(),
+                    &[vk::SubmitInfo::default()
+                        .command_buffers(&[buffer])
+                        .signal_semaphores(&[timeline_semaphore])
+                        .push_next(&mut timeline_info)],
+                    vk::Fence::null(),
+                )
+                .unwrap();
+            vk_dev
+                .wait_semaphores(
+                    &vk::SemaphoreWaitInfo::default()
+                        .values(&[2])
+                        .semaphores(&[timeline_semaphore]),
+                    u64::MAX,
+                )
+                .unwrap();
+            vk_dev.destroy_semaphore(timeline_semaphore, None);
+            vk_dev.destroy_command_pool(command_pool, None);
+        })
+    };
 }
 
 fn insert_dmatex_into_gpu_images(
@@ -268,7 +442,7 @@ fn get_imported_descriptor(buf: &Dmatex) -> Result<wgpu::TextureDescriptor<'stat
 pub struct ImportedTexture {
     texture: Texture,
     texture_view: TextureView,
-    _usage: DmatexUsage,
+    usage: DmatexUsage,
 }
 
 #[tracing::instrument(level = "debug", skip(device, on_drop))]
@@ -581,6 +755,6 @@ pub fn import_texture(
     Ok(ImportedTexture {
         texture,
         texture_view,
-        _usage: usage,
+        usage,
     })
 }
