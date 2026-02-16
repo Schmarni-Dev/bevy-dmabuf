@@ -364,7 +364,6 @@ fn insert_dmatex_into_gpu_images(
     for handle in handles {
         // filter out outdated dmatexs
         if gpu_images.get(&handle).is_none() {
-            imported.remove(&handle);
             continue;
         }
         if matches!(imported.get(&handle), Some(DmaImage::UnImported(_, _, _)))
