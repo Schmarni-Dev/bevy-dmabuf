@@ -99,6 +99,7 @@ pub struct ImportedDmatexs(Arc<Mutex<HashMap<Handle<Image>, DmaImage>>>);
 enum DmaImage {
     UnImported(Dmatex, DropCallback, DmatexUsage),
     Imported(ImportedTexture),
+    Applied(ImportedTexture),
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -244,7 +245,7 @@ fn memory_barrier(
                 .iter()
                 .filter_map(|v| match v.1 {
                     DmaImage::UnImported(_, _, _) => None,
-                    DmaImage::Imported(imported_texture) => Some(imported_texture),
+                    DmaImage::Imported(tex) | DmaImage::Applied(tex) => Some(tex),
                 })
                 .filter_map(|i| {
                     i.texture
@@ -364,6 +365,9 @@ fn insert_dmatex_into_gpu_images(
     for handle in handles {
         // filter out outdated dmatexs
         if gpu_images.get(&handle).is_none() {
+            if matches!(imported.get(&handle), Some(DmaImage::Applied(_))) {
+                imported.remove(&handle);
+            }
             continue;
         }
         if matches!(imported.get(&handle), Some(DmaImage::UnImported(_, _, _)))
@@ -385,7 +389,7 @@ fn insert_dmatex_into_gpu_images(
             continue;
         };
 
-        if let Some(DmaImage::Imported(tex)) = imported.get(&handle) {
+        if let Some(DmaImage::Imported(tex) | DmaImage::Applied(tex)) = imported.get(&handle) {
             debug!("setting texture view!");
             render_tex.texture_view = tex.texture_view.clone();
             render_tex.size = tex.texture.size();
@@ -393,6 +397,9 @@ fn insert_dmatex_into_gpu_images(
             render_tex.texture = tex.texture.clone();
         } else {
             error!("unreachable");
+        }
+        if let Some(DmaImage::Imported(tex)) = imported.remove(&handle) {
+            imported.insert(handle, DmaImage::Applied(tex));
         }
     }
 }
