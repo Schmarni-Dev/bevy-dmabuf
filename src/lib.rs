@@ -12,8 +12,6 @@ pub fn required_device_extensions() -> Vec<&'static CStr> {
         ash::ext::external_memory_dma_buf::NAME,
         ash::khr::external_memory_fd::NAME,
         ash::khr::external_memory::NAME,
-        ash::khr::external_semaphore::NAME,
-        ash::khr::external_semaphore_fd::NAME,
         ash::khr::swapchain::NAME,
     ]
 }

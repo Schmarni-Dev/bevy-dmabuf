@@ -1,17 +1,26 @@
 /// Plugin to init the vulkan session with the required extensions,
 /// probably not needed when using bevy_mod_openxr
-pub struct DmabufWgpuInitPlugin;
+#[derive(Default)]
+pub struct DmabufWgpuInitPlugin {
+    pub additional_device_extensions: Vec<&'static std::ffi::CStr>,
+}
 
-pub fn add_dmabuf_init_plugin<G: PluginGroup>(plugins: G) -> PluginGroupBuilder {
+pub fn add_dmabuf_init_plugin<G: PluginGroup>(
+    plugins: G,
+    additional_device_extensions: impl IntoIterator<Item = &'static std::ffi::CStr>,
+) -> PluginGroupBuilder {
     plugins
         .build()
         .disable::<RenderPlugin>()
-        .add_before::<RenderPlugin>(DmabufWgpuInitPlugin)
+        .add_before::<RenderPlugin>(DmabufWgpuInitPlugin {
+            additional_device_extensions: additional_device_extensions.into_iter().collect(),
+        })
 }
 
 impl Plugin for DmabufWgpuInitPlugin {
     fn build(&self, app: &mut bevy::app::App) {
-        let (device, queue, adapter_info, adapter, instance) = init_graphics().unwrap();
+        let (device, queue, adapter_info, adapter, instance) =
+            init_graphics(&self.additional_device_extensions).unwrap();
         app.add_plugins(RenderPlugin {
             render_creation: RenderCreation::Manual(RenderResources(
                 device.into(),
@@ -47,7 +56,9 @@ const VK_TARGET_VERSION_ASH: u32 = ash::vk::make_api_version(0, 1, 2, 0);
 #[cfg(target_os = "android")]
 const VK_TARGET_VERSION_ASH: u32 = ash::vk::make_api_version(0, 1, 1, 0);
 
-fn init_graphics() -> color_eyre::Result<(
+fn init_graphics(
+    additional_device_extensions: &[&'static std::ffi::CStr],
+) -> color_eyre::Result<(
     wgpu::Device,
     wgpu::Queue,
     wgpu::AdapterInfo,
@@ -71,6 +82,7 @@ fn init_graphics() -> color_eyre::Result<(
         ash::ext::metal_objects::NAME,
     ];
     device_extensions.extend(required_device_extensions());
+    device_extensions.extend(additional_device_extensions);
     device_extensions.dedup();
 
     let vk_instance = unsafe {

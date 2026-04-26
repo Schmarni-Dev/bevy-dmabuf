@@ -52,7 +52,7 @@ async fn main() -> AppExit {
     App::new()
         .insert_resource(Receiver(rx.into()))
         .init_resource::<PendingDmatex>()
-        .add_plugins(add_dmabuf_init_plugin(DefaultPlugins).disable::<PipelinedRenderingPlugin>())
+        .add_plugins(add_dmabuf_init_plugin(DefaultPlugins, []).disable::<PipelinedRenderingPlugin>())
         .add_plugins(DmabufImportPlugin)
         .add_systems(Startup, setup)
         .add_systems(PreUpdate, update_tex)
